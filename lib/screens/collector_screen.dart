@@ -1,22 +1,37 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../models/app_user.dart';
 import '../models/pickup_request.dart';
 import '../services/dialer_service.dart';
 import '../services/firestore_service.dart';
-import '../services/pickup_confirmation_service.dart';
+import '../services/location_service.dart';
+import '../services/route_service.dart';
 import '../widgets/eco_background.dart';
 import '../widgets/glass_card.dart';
-import 'package:geolocator/geolocator.dart';
 
-class CollectorScreen extends StatelessWidget {
+class CollectorScreen extends StatefulWidget {
   const CollectorScreen({super.key, required this.user, required this.firestore});
 
   final AppUser user;
   final FirestoreService firestore;
+
+  @override
+  State<CollectorScreen> createState() => _CollectorScreenState();
+}
+
+class _CollectorScreenState extends State<CollectorScreen> {
+  /// Route density mode is OPTIONAL: off by default, the collector just sees
+  /// the normal job list. On, nearby pending jobs are clustered and ordered
+  /// into a short sweep route.
+  bool _routeMode = false;
+  final _location = const LocationService();
+  final _planner = const RoutePlanner();
 
   Future<void> _signOut() => FirebaseAuth.instance.signOut();
 
@@ -26,18 +41,52 @@ class CollectorScreen extends StatelessWidget {
       body: EcoBackground(
         child: SafeArea(
           child: StreamBuilder<List<PickupRequest>>(
-            stream: firestore.streamOpenRequests(),
+            stream: widget.firestore.streamOpenRequests(),
             builder: (context, snapshot) {
               final allRequests = snapshot.data ?? const <PickupRequest>[];
               final visibleRequests = allRequests
-                  .where((request) => request.isPending || (request.isClaimed && request.collectorId == user.uid))
+                  .where((request) => request.isPending || (request.isClaimed && request.collectorId == widget.user.uid))
                   .toList();
               return CustomScrollView(
                 slivers: [
                   SliverPadding(
                     padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
-                    sliver: SliverToBoxAdapter(child: _Header(name: user.name, onSignOut: _signOut)),
+                    sliver: SliverToBoxAdapter(
+                      child: _Header(
+                        name: widget.user.name,
+                        onSignOut: _signOut,
+                        routeMode: _routeMode,
+                        onRouteModeChanged: (value) => setState(() => _routeMode = value),
+                      ),
+                    ),
                   ),
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                    sliver: SliverToBoxAdapter(child: _ReliabilityStrip(uid: widget.user.uid, firestore: widget.firestore)),
+                  ),
+                  if (_routeMode)
+                    SliverPadding(
+                      padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                      sliver: SliverToBoxAdapter(
+                        child: FutureBuilder<Position>(
+                          future: _location.getCurrentPosition(),
+                          builder: (context, positionSnapshot) {
+                            final position = positionSnapshot.data;
+                            if (position == null) {
+                              return const GlassCard(
+                                child: Text('Turn on location to plan a density route.'),
+                              );
+                            }
+                            final route = _planner.plan(
+                              openRequests: allRequests.where((request) => request.isPending).toList(),
+                              collectorLatitude: position.latitude,
+                              collectorLongitude: position.longitude,
+                            );
+                            return _RouteCard(route: route, firestore: widget.firestore, collector: widget.user);
+                          },
+                        ),
+                      ),
+                    ),
                   SliverPadding(
                     padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
                     sliver: SliverToBoxAdapter(child: _JobsMap(requests: visibleRequests)),
@@ -45,7 +94,7 @@ class CollectorScreen extends StatelessWidget {
                   SliverPadding(
                     padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
                     sliver: SliverToBoxAdapter(
-                      child: _JobsToolbar(requests: visibleRequests, collector: user, firestore: firestore),
+                      child: Text('Available pickup jobs', style: Theme.of(context).textTheme.titleLarge),
                     ),
                   ),
                   if (visibleRequests.isEmpty)
@@ -81,71 +130,60 @@ class CollectorScreen extends StatelessWidget {
   }
 }
 
+/// The collector's own accountability record: reliability score and strikes.
+class _ReliabilityStrip extends StatelessWidget {
+  const _ReliabilityStrip({required this.uid, required this.firestore});
 
-/// Optional "route density" mode: clusters nearby open jobs into one trip.
-/// Toggle is per-collector; the map/claim flow is unchanged for singles.
-class _JobsToolbar extends StatefulWidget {
-  const _JobsToolbar({required this.requests, required this.collector, required this.firestore});
-
-  final List<PickupRequest> requests;
-  final AppUser collector;
+  final String uid;
   final FirestoreService firestore;
 
   @override
-  State<_JobsToolbar> createState() => _JobsToolbarState();
-}
-
-class _JobsToolbarState extends State<_JobsToolbar> {
-  bool _density = false;
-  List<List<PickupRequest>>? _batches;
-
-  Future<void> _toggle() async {
-    if (_density) {
-      setState(() { _density = false; _batches = null; });
-      return;
-    }
-    // Seed the clustering with the device's own position when available,
-    // falling back to the first job's location.
-    double lat = widget.requests.isEmpty ? 4.1593 : widget.requests.first.latitude;
-    double lng = widget.requests.isEmpty ? 9.2435 : widget.requests.first.longitude;
-    final batches = await PickupConfirmationService(widget.firestore.db).clustersFor(
-      openRequests: widget.requests.where((r) => r.isPending).toList(),
-      latitude: lat,
-      longitude: lng,
-    );
-    if (!mounted) return;
-    setState(() { _density = true; _batches = batches; });
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(child: Text('Available pickup jobs', style: Theme.of(context).textTheme.titleLarge)),
-            Switch(value: _density, onChanged: (_) => _toggle(), activeColor: const Color(0xFF10B981)),
-            const Text('Route density', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.w600)),
-          ],
-        ),
-        if (_density && _batches != null && _batches!.isNotEmpty)
-          Text(
-            '${_batches!.length} efficient routes found — claim a cluster to sweep nearby jobs in one trip.',
-            style: const TextStyle(color: Colors.white70, fontSize: 12),
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: firestore.streamCollectorRecord(uid),
+      builder: (context, snapshot) {
+        final data = snapshot.data?.data() ?? const <String, dynamic>{};
+        final completed = (data['completed_count'] as num?)?.toInt() ?? 0;
+        final disputed = (data['disputed_count'] as num?)?.toInt() ?? 0;
+        final strikes = (data['strikes'] as num?)?.toInt() ?? 0;
+        final suspended = data['suspended'] as bool? ?? false;
+        final total = completed + disputed;
+        final score = total == 0 ? null : (completed / total * 100).round();
+        return GlassCard(
+          child: Row(
+            children: [
+              const Icon(Icons.verified_outlined, color: Color(0xFF4ADE80)),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  score == null
+                      ? 'Reliability: no completed pickups yet'
+                      : 'Reliability: $score% ($completed completed, $disputed disputed) · Strikes: $strikes/3',
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                ),
+              ),
+              if (suspended)
+                const Text('SUSPENDED', style: TextStyle(color: Color(0xFFEF4444), fontWeight: FontWeight.w800)),
+            ],
           ),
-      ],
+        );
+      },
     );
   }
 }
 
 class _Header extends StatelessWidget {
-
-
-  const _Header({required this.name, required this.onSignOut});
+  const _Header({
+    required this.name,
+    required this.onSignOut,
+    required this.routeMode,
+    required this.onRouteModeChanged,
+  });
 
   final String name;
   final VoidCallback onSignOut;
+  final bool routeMode;
+  final ValueChanged<bool> onRouteModeChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -160,8 +198,89 @@ class _Header extends StatelessWidget {
             ],
           ),
         ),
+        Tooltip(
+          message: 'Route density mode: cluster nearby jobs into one sweep',
+          child: Switch(
+            value: routeMode,
+            onChanged: onRouteModeChanged,
+            activeColor: const Color(0xFF10B981),
+          ),
+        ),
         IconButton(onPressed: onSignOut, icon: const Icon(Icons.logout)),
       ],
+    );
+  }
+}
+
+/// Route density mode card: nearby pending jobs ordered as one sweep, each
+/// stop claimable inline. Jobs beyond the planning radius are counted, not
+/// hidden — the collector still knows they exist.
+class _RouteCard extends StatelessWidget {
+  const _RouteCard({required this.route, required this.firestore, required this.collector});
+
+  final PlannedRoute route;
+  final FirestoreService firestore;
+  final AppUser collector;
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Density route (optional sweep)',
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(color: Colors.white, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          Text('${route.stops.length} nearby stops · ${route.skipped.length} jobs beyond 1.5 km',
+              style: const TextStyle(color: Colors.white70, fontSize: 12)),
+          const SizedBox(height: 10),
+          if (route.stops.isEmpty)
+            const Text('No pending jobs within 1.5 km.', style: TextStyle(color: Colors.white70))
+          else
+            ...route.stops.asMap().entries.map((entry) {
+              final stop = entry.value;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  children: [
+                    Text('${entry.key + 1}.',
+                        style: const TextStyle(color: Color(0xFF4ADE80), fontWeight: FontWeight.w700)),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '${stop.request.wasteType} · ${stop.distanceMeters.round()} m',
+                        style: const TextStyle(color: Colors.white),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () async {
+                        try {
+                          final position = await const LocationService().getCurrentPosition();
+                          await firestore.claimRequest(
+                            requestId: stop.request.requestId,
+                            collectorId: collector.uid,
+                          );
+                          await firestore.logLocationEvent(
+                            requestId: stop.request.requestId,
+                            actorId: collector.uid,
+                            event: 'claimed',
+                            latitude: position.latitude,
+                            longitude: position.longitude,
+                            accuracyMeters: position.accuracy,
+                          );
+                        } catch (_) {
+                          // claim races are surfaced on the job card itself
+                        }
+                      },
+                      child: const Text('Claim'),
+                    ),
+                  ],
+                ),
+              );
+            }),
+        ],
+      ),
     );
   }
 }
@@ -247,11 +366,9 @@ class _CollectorJobCardState extends State<_CollectorJobCard> {
   static String _friendly(Object error) => error is FirestoreServiceException
       ? error.message
       : 'Something went wrong — check your connection and try again.';
-
-  late final PickupConfirmationService _confirmation =
-      PickupConfirmationService(widget.firestore.db);
   bool _loading = false;
   String? _message;
+  final _location = const LocationService();
 
   Future<void> _claim() async {
     setState(() {
@@ -260,6 +377,22 @@ class _CollectorJobCardState extends State<_CollectorJobCard> {
     });
     try {
       await widget.firestore.claimRequest(requestId: widget.request.requestId, collectorId: widget.collector.uid);
+      // Breadcrumb the claim into the location log — dispute evidence starts
+      // here, not only at completion.
+      try {
+        final position = await _location.getCurrentPosition();
+        await widget.firestore.logLocationEvent(
+          requestId: widget.request.requestId,
+          actorId: widget.collector.uid,
+          event: 'claimed',
+          latitude: position.latitude,
+          longitude: position.longitude,
+          accuracyMeters: position.accuracy,
+        );
+      } catch (_) {
+        // Location logging is evidence, not a claim requirement — a denied
+        // permission here must not block claiming; completion still requires GPS.
+      }
     } catch (error) {
       setState(() => _message = _friendly(error));
     } finally {
@@ -273,37 +406,28 @@ class _CollectorJobCardState extends State<_CollectorJobCard> {
       _message = null;
     });
     try {
-      // Geofenced: the device fix must be within 50m of the tagged location.
-      final fix = await _currentFix();
-      if (fix == null) {
-        setState(() => _message = 'Location unavailable — enable GPS and try again.');
-        return;
-      }
-      await _confirmation.markPickedUp(
-        request: widget.request,
-        collectorId: widget.collector.uid,
-        latitude: fix.latitude,
-        longitude: fix.longitude,
+      final position = await _location.getCurrentPosition();
+      // Log the arrival position, then attempt the geofenced completion.
+      await widget.firestore.logLocationEvent(
+        requestId: widget.request.requestId,
+        actorId: widget.collector.uid,
+        event: 'completion_attempt',
+        latitude: position.latitude,
+        longitude: position.longitude,
+        accuracyMeters: position.accuracy,
       );
-      if (!mounted) return;
-      setState(() => _message = 'Pickup recorded at the job site. Awaiting customer confirmation.');
+      await widget.firestore.completeRequest(
+        requestId: widget.request.requestId,
+        collectorId: widget.collector.uid,
+        collectorLatitude: position.latitude,
+        collectorLongitude: position.longitude,
+        accuracyMeters: position.accuracy,
+      );
+      setState(() => _message = 'Marked complete — waiting for the customer to confirm collection.');
     } catch (error) {
-      if (mounted) setState(() => _message = _friendly(error));
+      setState(() => _message = _friendly(error));
     } finally {
       if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  /// One-shot device position. Uses the location plugin when available;
-  /// null means the platform cannot provide a fix right now.
-  Future<({double latitude, double longitude})?> _currentFix() async {
-    try {
-      final position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, timeLimit: Duration(seconds: 8)),
-      );
-      return (latitude: position.latitude, longitude: position.longitude);
-    } catch (_) {
-      return null;
     }
   }
 
@@ -367,9 +491,16 @@ class _CollectorJobCardState extends State<_CollectorJobCard> {
               child: FilledButton(
                 onPressed: _loading ? null : _complete,
                 style: FilledButton.styleFrom(backgroundColor: const Color(0xFF10B981), foregroundColor: Colors.white),
-                child: Text(_loading ? 'Locating you…' : (request.isPickedUp ? 'Pickup recorded — awaiting customer' : 'Confirm Pickup Here (50m gate)')),
+                child: Text(_loading ? 'Please wait...' : 'Mark Complete'),
               ),
             ),
+          if (canComplete) ...[
+            const SizedBox(height: 6),
+            const Text(
+              'You must be within 50 m of the pickup point to mark complete. The customer then confirms collection.',
+              style: TextStyle(color: Colors.white60, fontSize: 12),
+            ),
+          ],
           if (_message != null) ...[
             const SizedBox(height: 8),
             Text(_message!, style: const TextStyle(color: Color(0xFF4ADE80), fontWeight: FontWeight.w700)),

@@ -19,6 +19,7 @@ class AppUser {
 
   bool get isGenerator => role == 'generator';
   bool get isCollector => role == 'collector';
+  bool get isAdmin => role == 'admin';
 
   Map<String, Object?> toFirestore() {
     return {

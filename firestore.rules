@@ -1,6 +1,17 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Helper: is the caller an admin (role on their user doc)?
+    function isAdmin() {
+      return request.auth != null &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    function isRequestParticipant(requestId) {
+      let req = get(/databases/$(database)/documents/requests/$(requestId)).data;
+      return request.auth != null && (req.generator_id == request.auth.uid || req.collector_id == request.auth.uid);
+    }
+
     // Users: readable by any signed-in user (names appear on requests),
     // writable only by the owner. FCM tokens stay owner-only.
     match /users/{userId} {
@@ -8,17 +19,44 @@ service cloud.firestore {
       allow create, update: if request.auth != null && request.auth.uid == userId;
     }
 
-    // Collector availability entries: readable, owner-writable.
+    // Collector accountability record: readable by signed-in users (the
+    // marketplace surfaces reliability), writable only by its owner for the
+    // availability fields. strikes/disputed_count/suspended/counts are
+    // server-managed — clients may never touch those keys.
     match /collectors/{collectorId} {
       allow read: if request.auth != null;
-      allow create, update: if request.auth != null && request.auth.uid == collectorId;
+      allow create, update: if request.auth != null && request.auth.uid == collectorId
+        && !request.resource.data.diff(resource.data).affectedKeys()
+              .hasAny(['strikes', 'disputed_count', 'no_show_count', 'completed_count', 'suspended']);
+    }
+
+    // Immutable strike ledger: admin-writable (and Cloud Functions with the
+    // Admin SDK, which bypass rules). Readable by the struck collector.
+    match /strikes/{strikeId} {
+      allow read: if request.auth != null && resource.data.collector_id == request.auth.uid;
+      allow write: if isAdmin();
+    }
+
+    // Disputes: any signed-in user may raise one against a real claim
+    // (raised_by must be them); only admins update/resolve.
+    match /disputes/{disputeId} {
+      allow read: if request.auth != null &&
+        (resource.data.raised_by == request.auth.uid || resource.data.against == request.auth.uid || isAdmin());
+      allow create: if request.auth != null
+        && request.resource.data.raised_by == request.auth.uid
+        && request.resource.data.status == 'open'
+        && request.resource.data.request_id is string;
+      allow update, delete: if isAdmin();
     }
 
     // Requests: signed-in users read; only the owning generator creates;
     // collectors may only claim (set collector_id + status = claimed);
-    // completion restricted to the claiming collector. Direct client writes
-    // to status/collector_id by others are denied — transitions go through
-    // the app's Firestore transactions, which run with the user's own auth.
+    // completion requires the claiming collector AND pickup coordinates
+    // within 50 m of the job location (haversine in-app; rules enforce the
+    // fields' presence and a sane range). Confirmation transitions are
+    // restricted to the owning generator. Client-side claim-guard:
+    // suspended collectors are rejected in the app transaction; the admin
+    // SDK (fallback dispatch function) bypasses rules for auto-reverts.
     match /requests/{requestId} {
       allow read: if request.auth != null;
       allow create: if request.auth != null
@@ -37,12 +75,40 @@ service cloud.firestore {
             && request.resource.data.waste_type == resource.data.waste_type
             && request.resource.data.latitude == resource.data.latitude
             && request.resource.data.longitude == resource.data.longitude)
-        // claiming collector completes
+        // claiming collector completes with pickup coordinates (location-log
+        // confirmation). Distance is validated in the app transaction; rules
+        // ensure coordinates exist and are plausible values.
         || (resource.data.status == 'claimed'
             && resource.data.collector_id == request.auth.uid
-            && request.resource.data.status == 'completed')
+            && request.resource.data.status == 'completed'
+            && request.resource.data.confirmation_status == 'awaiting_confirmation'
+            && request.resource.data.pickup_latitude is number
+            && request.resource.data.pickup_longitude is number
+            && request.resource.data.pickup_latitude >= -90 && request.resource.data.pickup_latitude <= 90
+            && request.resource.data.pickup_longitude >= -180 && request.resource.data.pickup_longitude <= 180)
+        // the owning generator confirms pickup or disputes it
+        || (resource.data.confirmation_status == 'awaiting_confirmation'
+            && resource.data.generator_id == request.auth.uid
+            && request.resource.data.confirmation_status in ['confirmed', 'disputed'])
+        // generator (or admin) flags a manual not-collected report on an
+        // active/claimed/completed request, once.
+        || (resource.data.generator_id == request.auth.uid
+            && resource.data.confirmation_status != 'disputed'
+            && request.resource.data.confirmation_status == 'disputed'
+            && request.resource.data.status == resource.data.status)
       );
       allow delete: if false;
+
+      // Append-only location log: participants may append evidence entries;
+      // nobody may alter or delete existing entries.
+      match /location_log/{entryId} {
+        allow read: if isRequestParticipant(requestId) || isAdmin();
+        allow create: if isRequestParticipant(requestId)
+          && request.resource.data.event is string
+          && request.resource.data.latitude is number
+          && request.resource.data.longitude is number;
+        allow update, delete: if false;
+      }
     }
   }
 }

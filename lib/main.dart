@@ -7,6 +7,7 @@ import 'package:google_fonts/google_fonts.dart';
 
 import 'firebase_options.dart';
 import 'models/app_user.dart';
+import 'screens/admin_screen.dart';
 import 'screens/auth_screen.dart';
 import 'screens/collector_screen.dart';
 import 'screens/generator_screen.dart';
@@ -127,6 +128,9 @@ class _RoleHomeState extends State<_RoleHome> {
 
   @override
   Widget build(BuildContext context) {
+    if (widget.user.isAdmin) {
+      return AdminScreen(user: widget.user, firestore: widget.firestore);
+    }
     if (widget.user.isCollector) {
       return CollectorScreen(user: widget.user, firestore: widget.firestore);
     }

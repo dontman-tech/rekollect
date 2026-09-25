@@ -12,6 +12,11 @@ class PickupRequest {
     required this.createdAt,
     this.collectorId,
     this.directionsLandmarks,
+    this.confirmationStatus,
+    this.pickupLatitude,
+    this.pickupLongitude,
+    this.claimedAt,
+    this.locationLogCount = 0,
   });
 
   final String requestId;
@@ -25,12 +30,28 @@ class PickupRequest {
   final String? collectorId;
   final String? directionsLandmarks;
 
+  /// Two-sided pickup confirmation lifecycle:
+  /// null (legacy/none) -> 'awaiting_confirmation' (collector completed at the
+  /// job location) -> 'confirmed' (generator agreed) or 'disputed' (generator
+  /// reported the trash was NOT collected; goes to the admin dispute queue).
+  final String? confirmationStatus;
+
+  /// The collector's GPS position logged at completion (the location-log
+  /// confirmation). Null for legacy completed requests.
+  final double? pickupLatitude;
+  final double? pickupLongitude;
+  final Timestamp? claimedAt;
+
+  /// Denormalized count of location-log entries, shown as evidence in the
+  /// dispute workflow without reading the subcollection.
+  final int locationLogCount;
+
   bool get isPending => status == 'pending';
   bool get isClaimed => status == 'claimed';
   bool get isCompleted => status == 'completed';
-  bool get isPickedUp => status == 'picked_up';
-  bool get isDisputed => status == 'disputed';
-  bool get isCancelled => status == 'cancelled';
+  bool get isAwaitingConfirmation => confirmationStatus == 'awaiting_confirmation';
+  bool get isDisputed => confirmationStatus == 'disputed';
+  bool get isConfirmed => confirmationStatus == 'confirmed';
 
   factory PickupRequest.fromDocument(DocumentSnapshot<Map<String, dynamic>> doc) {
     final data = doc.data() ?? <String, dynamic>{};
@@ -45,7 +66,11 @@ class PickupRequest {
       createdAt: data['created_at'] as Timestamp?,
       collectorId: data['collector_id'] as String?,
       directionsLandmarks: data['directions_landmarks'] as String?,
-      relistedCount: (data['relisted_count'] as num?)?.toInt() ?? 0,
+      confirmationStatus: data['confirmation_status'] as String?,
+      pickupLatitude: (data['pickup_latitude'] as num?)?.toDouble(),
+      pickupLongitude: (data['pickup_longitude'] as num?)?.toDouble(),
+      claimedAt: data['claimed_at'] as Timestamp?,
+      locationLogCount: (data['location_log_count'] as num?)?.toInt() ?? 0,
     );
   }
 }
