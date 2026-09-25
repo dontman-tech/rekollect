@@ -7,6 +7,7 @@ import '../models/app_user.dart';
 import '../models/pickup_request.dart';
 import '../services/dialer_service.dart';
 import '../services/firestore_service.dart';
+import '../services/pickup_confirmation_service.dart';
 import '../services/nominatim_service.dart';
 import '../widgets/eco_background.dart';
 import '../widgets/glass_card.dart';
@@ -306,14 +307,56 @@ class _PaymentDisclaimer extends StatelessWidget {
   }
 }
 
-class _GeneratorRequestCard extends StatelessWidget {
+class _GeneratorRequestCard extends StatefulWidget {
   const _GeneratorRequestCard({required this.request, required this.firestore});
 
   final PickupRequest request;
   final FirestoreService firestore;
 
   @override
+  State<_GeneratorRequestCard> createState() => _GeneratorRequestCardState();
+}
+
+class _GeneratorRequestCardState extends State<_GeneratorRequestCard> {
+  bool _busy = false;
+  String? _message;
+
+  static String _friendly(Object error) => error is ConfirmationException
+      ? error.message
+      : 'Something went wrong — check your connection and try again.';
+
+  PickupConfirmationService get _confirmation =>
+      PickupConfirmationService(widget.firestore.db);
+
+  Future<void> _confirm() async {
+    setState(() { _busy = true; _message = null; });
+    try {
+      await _confirmation.confirmCollected(request: widget.request, generatorId: widget.request.generatorId);
+      if (!mounted) return;
+      setState(() => _message = 'Thank you — job confirmed. Reliability updated.');
+    } catch (error) {
+      if (mounted) setState(() => _message = _friendly(error));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _report() async {
+    setState(() { _busy = true; _message = null; });
+    try {
+      await _confirmation.reportNotCollected(request: widget.request, generatorId: widget.request.generatorId);
+      if (!mounted) return;
+      setState(() => _message = 'Reported. Our team will review — the job stays open for other collectors.');
+    } catch (error) {
+      if (mounted) setState(() => _message = _friendly(error));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final request = widget.request;
     return GlassCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -333,20 +376,65 @@ class _GeneratorRequestCard extends StatelessWidget {
           ],
           const SizedBox(height: 12),
           const _PaymentDisclaimer(),
-          if (request.isClaimed && request.collectorId != null) ...[
+          if (request.collectorId != null) ...[
             const SizedBox(height: 12),
             FutureBuilder<AppUser?>(
-              future: firestore.getUser(request.collectorId!),
+              future: widget.firestore.getUser(request.collectorId!),
               builder: (context, snapshot) {
                 final collector = snapshot.data;
-                return FilledButton.icon(
-                  onPressed: collector == null ? null : () => DialerService.openDialer(collector.phoneNumber),
-                  icon: const Icon(Icons.call),
-                  label: const Text('Call Collector'),
-                  style: FilledButton.styleFrom(backgroundColor: const Color(0xFF4ADE80), foregroundColor: const Color(0xFF064E3B)),
-                );
+                return Row(children: [
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: collector == null ? null : () => DialerService.openDialer(collector.phoneNumber),
+                      icon: const Icon(Icons.call),
+                      label: const Text('Call Collector'),
+                      style: FilledButton.styleFrom(backgroundColor: const Color(0xFF4ADE80), foregroundColor: const Color(0xFF064E3B)),
+                    ),
+                  ),
+                  if (request.isPickedUp) ...[
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: FutureBuilder<ReliabilityScore>(
+                        future: _confirmation.reliability(request.collectorId!),
+                        builder: (context, s) {
+                          final score = s.data;
+                          final label = score == null || score.percent == null
+                              ? 'Reliability: new'
+                              : 'Reliability: ${score.percent}%';
+                          return Text(label, style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.w700));
+                        },
+                      ),
+                    ),
+                  ],
+                ]);
               },
             ),
+          ],
+          if (request.isPickedUp) ...[
+            const SizedBox(height: 14),
+            Text('Was your trash collected?', style: Theme.of(context).textTheme.titleMedium?.copyWith(color: Colors.white, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 10),
+            Row(children: [
+              Expanded(
+                child: FilledButton(
+                  onPressed: _busy ? null : _confirm,
+                  style: FilledButton.styleFrom(backgroundColor: const Color(0xFF10B981), foregroundColor: Colors.white),
+                  child: const Text('Yes — Collected ✓'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: FilledButton(
+                  onPressed: _busy ? null : _report,
+                  style: FilledButton.styleFrom(backgroundColor: const Color(0xFFB91C1C), foregroundColor: Colors.white),
+                  child: const Text('No — Report'),
+                ),
+              ),
+            ]),
+          ],
+          if (_message != null) ...[
+            const SizedBox(height: 8),
+            Text(_message!, style: const TextStyle(color: Color(0xFF4ADE80), fontWeight: FontWeight.w700)),
           ],
         ],
       ),

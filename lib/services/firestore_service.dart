@@ -8,6 +8,9 @@ class FirestoreService {
 
   final FirebaseFirestore _db;
 
+  /// Visible to screens that compose services (e.g. geofenced confirmation).
+  FirebaseFirestore get db => _db;
+
   static const int maxOpenRequests = 3;
 
   // ------------------------------------------------------------------ users

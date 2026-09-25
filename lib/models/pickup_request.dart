@@ -28,6 +28,9 @@ class PickupRequest {
   bool get isPending => status == 'pending';
   bool get isClaimed => status == 'claimed';
   bool get isCompleted => status == 'completed';
+  bool get isPickedUp => status == 'picked_up';
+  bool get isDisputed => status == 'disputed';
+  bool get isCancelled => status == 'cancelled';
 
   factory PickupRequest.fromDocument(DocumentSnapshot<Map<String, dynamic>> doc) {
     final data = doc.data() ?? <String, dynamic>{};
@@ -42,6 +45,7 @@ class PickupRequest {
       createdAt: data['created_at'] as Timestamp?,
       collectorId: data['collector_id'] as String?,
       directionsLandmarks: data['directions_landmarks'] as String?,
+      relistedCount: (data['relisted_count'] as num?)?.toInt() ?? 0,
     );
   }
 }

@@ -7,8 +7,10 @@ import '../models/app_user.dart';
 import '../models/pickup_request.dart';
 import '../services/dialer_service.dart';
 import '../services/firestore_service.dart';
+import '../services/pickup_confirmation_service.dart';
 import '../widgets/eco_background.dart';
 import '../widgets/glass_card.dart';
+import 'package:geolocator/geolocator.dart';
 
 class CollectorScreen extends StatelessWidget {
   const CollectorScreen({super.key, required this.user, required this.firestore});
@@ -43,7 +45,7 @@ class CollectorScreen extends StatelessWidget {
                   SliverPadding(
                     padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
                     sliver: SliverToBoxAdapter(
-                      child: Text('Available pickup jobs', style: Theme.of(context).textTheme.titleLarge),
+                      child: _JobsToolbar(requests: visibleRequests, collector: user, firestore: firestore),
                     ),
                   ),
                   if (visibleRequests.isEmpty)
@@ -79,7 +81,67 @@ class CollectorScreen extends StatelessWidget {
   }
 }
 
+
+/// Optional "route density" mode: clusters nearby open jobs into one trip.
+/// Toggle is per-collector; the map/claim flow is unchanged for singles.
+class _JobsToolbar extends StatefulWidget {
+  const _JobsToolbar({required this.requests, required this.collector, required this.firestore});
+
+  final List<PickupRequest> requests;
+  final AppUser collector;
+  final FirestoreService firestore;
+
+  @override
+  State<_JobsToolbar> createState() => _JobsToolbarState();
+}
+
+class _JobsToolbarState extends State<_JobsToolbar> {
+  bool _density = false;
+  List<List<PickupRequest>>? _batches;
+
+  Future<void> _toggle() async {
+    if (_density) {
+      setState(() { _density = false; _batches = null; });
+      return;
+    }
+    // Seed the clustering with the device's own position when available,
+    // falling back to the first job's location.
+    double lat = widget.requests.isEmpty ? 4.1593 : widget.requests.first.latitude;
+    double lng = widget.requests.isEmpty ? 9.2435 : widget.requests.first.longitude;
+    final batches = await PickupConfirmationService(widget.firestore.db).clustersFor(
+      openRequests: widget.requests.where((r) => r.isPending).toList(),
+      latitude: lat,
+      longitude: lng,
+    );
+    if (!mounted) return;
+    setState(() { _density = true; _batches = batches; });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(child: Text('Available pickup jobs', style: Theme.of(context).textTheme.titleLarge)),
+            Switch(value: _density, onChanged: (_) => _toggle(), activeColor: const Color(0xFF10B981)),
+            const Text('Route density', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.w600)),
+          ],
+        ),
+        if (_density && _batches != null && _batches!.isNotEmpty)
+          Text(
+            '${_batches!.length} efficient routes found — claim a cluster to sweep nearby jobs in one trip.',
+            style: const TextStyle(color: Colors.white70, fontSize: 12),
+          ),
+      ],
+    );
+  }
+}
+
 class _Header extends StatelessWidget {
+
+
   const _Header({required this.name, required this.onSignOut});
 
   final String name;
@@ -185,6 +247,9 @@ class _CollectorJobCardState extends State<_CollectorJobCard> {
   static String _friendly(Object error) => error is FirestoreServiceException
       ? error.message
       : 'Something went wrong — check your connection and try again.';
+
+  late final PickupConfirmationService _confirmation =
+      PickupConfirmationService(widget.firestore.db);
   bool _loading = false;
   String? _message;
 
@@ -208,11 +273,37 @@ class _CollectorJobCardState extends State<_CollectorJobCard> {
       _message = null;
     });
     try {
-      await widget.firestore.completeRequest(requestId: widget.request.requestId, collectorId: widget.collector.uid);
+      // Geofenced: the device fix must be within 50m of the tagged location.
+      final fix = await _currentFix();
+      if (fix == null) {
+        setState(() => _message = 'Location unavailable — enable GPS and try again.');
+        return;
+      }
+      await _confirmation.markPickedUp(
+        request: widget.request,
+        collectorId: widget.collector.uid,
+        latitude: fix.latitude,
+        longitude: fix.longitude,
+      );
+      if (!mounted) return;
+      setState(() => _message = 'Pickup recorded at the job site. Awaiting customer confirmation.');
     } catch (error) {
-      setState(() => _message = _friendly(error));
+      if (mounted) setState(() => _message = _friendly(error));
     } finally {
       if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  /// One-shot device position. Uses the location plugin when available;
+  /// null means the platform cannot provide a fix right now.
+  Future<({double latitude, double longitude})?> _currentFix() async {
+    try {
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, timeLimit: Duration(seconds: 8)),
+      );
+      return (latitude: position.latitude, longitude: position.longitude);
+    } catch (_) {
+      return null;
     }
   }
 
@@ -276,7 +367,7 @@ class _CollectorJobCardState extends State<_CollectorJobCard> {
               child: FilledButton(
                 onPressed: _loading ? null : _complete,
                 style: FilledButton.styleFrom(backgroundColor: const Color(0xFF10B981), foregroundColor: Colors.white),
-                child: Text(_loading ? 'Please wait...' : 'Mark Complete'),
+                child: Text(_loading ? 'Locating you…' : (request.isPickedUp ? 'Pickup recorded — awaiting customer' : 'Confirm Pickup Here (50m gate)')),
               ),
             ),
           if (_message != null) ...[
