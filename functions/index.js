@@ -95,3 +95,50 @@ exports.fallbackDispatch = functions.pubsub
     functions.logger.info("fallbackDispatch", { reverted, suspendedSweep: atCap.size });
     return null;
   });
+
+// Weekly recurrence: when a recurring (weekly) request is confirmed, spawn
+// the next week's copy with the same generator, waste type, quantity, and
+// coordinates — scheduled 7 days ahead. Idempotent by the spawned_from marker.
+exports.spawnRecurringRequests = functions.pubsub
+  .schedule("every 10 minutes")
+  .timeZone("Africa/Douala")
+  .onRun(async (context) => {
+    const db = admin.firestore();
+    const confirmed = await db
+      .collection("requests")
+      .where("recurrence", "==", "weekly")
+      .where("confirmation_status", "==", "confirmed")
+      .get();
+
+    let spawned = 0;
+    for (const doc of confirmed.docs) {
+      const source = doc.data();
+      const existing = await db
+        .collection("requests")
+        .where("spawned_from", "==", doc.id)
+        .limit(1)
+        .get();
+      if (!existing.empty) continue; // already respawned
+
+      const ref = db.collection("requests").doc();
+      await ref.set({
+        request_id: ref.id,
+        generator_id: source.generator_id,
+        generator_type: source.generator_type,
+        waste_type: source.waste_type,
+        latitude: source.latitude,
+        longitude: source.longitude,
+        directions_landmarks: source.directions_landmarks || null,
+        quantity_band: source.quantity_band || null,
+        quantity_kg: source.quantity_kg || null,
+        status: "pending",
+        recurrence: "weekly",
+        scheduled_at: admin.firestore.Timestamp.fromMillis(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        created_at: admin.firestore.FieldValue.serverTimestamp(),
+        spawned_from: doc.id,
+      });
+      spawned += 1;
+    }
+    functions.logger.info("spawnRecurringRequests", { candidates: confirmed.size, spawned });
+    return null;
+  });

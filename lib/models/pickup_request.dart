@@ -1,5 +1,29 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+/// Waste categories a request or a collector can be tagged with. Collectors
+/// only see jobs whose waste type is in their handled set — hazardous waste
+/// in particular only routes to collectors who explicitly opted in.
+const kAllWasteTypes = ['Organic', 'Plastic', 'Electronic', 'Bulky', 'Hazardous'];
+
+/// Vehicle types and how much weight (kg) each can carry per job.
+const kVehicleCapacities = <String, int>{
+  'bicycle': 20,
+  'motorbike': 50,
+  'tricycle': 150,
+  'pickup': 500,
+  'truck': 1000,
+};
+
+const kVehicleTypes = kVehicleCapacities.keys.toList();
+
+/// Rough quantity bands a generator can pick without knowing exact weight.
+const kQuantityBands = <String, int>{
+  'one-bag': 15,
+  'few-bags': 40,
+  'several-bags': 100,
+  'bulk': 400,
+};
+
 class PickupRequest {
   const PickupRequest({
     required this.requestId,
@@ -17,6 +41,10 @@ class PickupRequest {
     this.pickupLongitude,
     this.claimedAt,
     this.locationLogCount = 0,
+    this.scheduledAt,
+    this.recurrence = 'once',
+    this.quantityBand,
+    this.quantityKg,
   });
 
   final String requestId;
@@ -46,6 +74,27 @@ class PickupRequest {
   /// dispute workflow without reading the subcollection.
   final int locationLogCount;
 
+  /// Scheduled pickup: when the generator wants this collected. Null = ASAP.
+  final Timestamp? scheduledAt;
+
+  /// 'once' or 'weekly' — a weekly request auto-respawns after confirmation.
+  final String recurrence;
+
+  /// Generator-declared size band (key of kQuantityBands), shown to collectors
+  /// and checked against vehicle capacity at claim time.
+  final String? quantityBand;
+
+  /// Optional exact weight, if the generator knows it.
+  final int? quantityKg;
+
+  bool get isRecurring => recurrence == 'weekly';
+
+  /// The estimated weight a collector must be able to carry for this job.
+  int get estimatedKg =>
+      quantityKg ?? kQuantityBands[quantityBand ?? 'one-bag'] ?? kQuantityBands['one-bag']!;
+
+  bool get isScheduled => scheduledAt != null;
+
   bool get isPending => status == 'pending';
   bool get isClaimed => status == 'claimed';
   bool get isCompleted => status == 'completed';
@@ -71,6 +120,10 @@ class PickupRequest {
       pickupLongitude: (data['pickup_longitude'] as num?)?.toDouble(),
       claimedAt: data['claimed_at'] as Timestamp?,
       locationLogCount: (data['location_log_count'] as num?)?.toInt() ?? 0,
+      scheduledAt: data['scheduled_at'] as Timestamp?,
+      recurrence: data['recurrence'] as String? ?? 'once',
+      quantityBand: data['quantity_band'] as String?,
+      quantityKg: (data['quantity_kg'] as num?)?.toInt(),
     );
   }
 }

@@ -33,6 +33,9 @@ class _GeneratorScreenState extends State<GeneratorScreen> {
 
   String _generatorType = 'individual';
   String _wasteType = 'Organic';
+  String _quantityBand = 'one-bag';
+  bool _recurring = false;
+  DateTime? _scheduledAt;
   LatLng? _selectedPoint;
   String? _message;
   bool _loading = false;
@@ -88,6 +91,9 @@ class _GeneratorScreenState extends State<GeneratorScreen> {
         latitude: point.latitude,
         longitude: point.longitude,
         directionsLandmarks: _directionsController.text,
+        scheduledAt: _scheduledAt,
+        recurrence: _recurring ? 'weekly' : 'once',
+        quantityBand: _quantityBand,
       );
       setState(() {
         _message = 'Pickup request submitted.';
@@ -161,9 +167,55 @@ class _GeneratorScreenState extends State<GeneratorScreen> {
               DropdownMenuItem(value: 'Organic', child: Text('Organic')),
               DropdownMenuItem(value: 'Plastic', child: Text('Plastic')),
               DropdownMenuItem(value: 'Electronic', child: Text('Electronic')),
+              DropdownMenuItem(value: 'Bulky', child: Text('Bulky (furniture, appliances)')),
+              DropdownMenuItem(value: 'Hazardous', child: Text('Hazardous (batteries, chemicals)')),
             ],
             onChanged: (value) => setState(() => _wasteType = value ?? _wasteType),
             decoration: const InputDecoration(labelText: 'Waste type'),
+          ),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<String>(
+            value: _quantityBand,
+            dropdownColor: const Color(0xFF064E3B),
+            items: const [
+              DropdownMenuItem(value: 'one-bag', child: Text('One bag (~15 kg)')),
+              DropdownMenuItem(value: 'few-bags', child: Text('A few bags (~40 kg)')),
+              DropdownMenuItem(value: 'several-bags', child: Text('Several bags (~100 kg)')),
+              DropdownMenuItem(value: 'bulk', child: Text('Bulk load (~400 kg)')),
+            ],
+            onChanged: (value) => setState(() => _quantityBand = value ?? _quantityBand),
+            decoration: const InputDecoration(labelText: 'How much waste?'),
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: () async {
+              final date = await showDatePicker(
+                context: context,
+                initialDate: _scheduledAt ?? DateTime.now().add(const Duration(hours: 2)),
+                firstDate: DateTime.now(),
+                lastDate: DateTime.now().add(const Duration(days: 90)),
+              );
+              if (date == null) return;
+              final time = await showTimePicker(
+                context: context,
+                initialTime: TimeOfDay.fromDateTime(_scheduledAt ?? DateTime.now().add(const Duration(hours: 2))),
+              );
+              setState(() => _scheduledAt = time == null
+                  ? DateTime(date.year, date.month, date.day)
+                  : DateTime(date.year, date.month, date.day, time.hour, time.minute));
+            },
+            icon: const Icon(Icons.event_outlined),
+            label: Text(_scheduledAt == null
+                ? 'Pick up ASAP'
+                : 'Scheduled: ${_scheduledAt!.day}/${_scheduledAt!.month} ${_scheduledAt!.hour.toString().padLeft(2, '0')}:${_scheduledAt!.minute.toString().padLeft(2, '0')}'),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            activeColor: const Color(0xFF4ADE80),
+            title: const Text('Repeat every week', style: TextStyle(color: Colors.white, fontSize: 14)),
+            subtitle: const Text('A fresh request is created automatically after each confirmed pickup.', style: TextStyle(color: Colors.white54, fontSize: 12)),
+            value: _recurring,
+            onChanged: (value) => setState(() => _recurring = value),
           ),
           const SizedBox(height: 12),
           TextField(
@@ -397,6 +449,8 @@ class _GeneratorRequestCard extends StatelessWidget {
                 );
               },
             ),
+            const SizedBox(height: 8),
+            _GeneratorChat(requestId: request.requestId, firestore: firestore, me: request.generatorId),
           ],
         ],
       ),
@@ -442,6 +496,82 @@ class _GlassChoice extends StatelessWidget {
       backgroundColor: Colors.white.withOpacity(0.08),
       labelStyle: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
       side: BorderSide(color: Colors.white.withOpacity(0.25)),
+    );
+  }
+}
+
+/// Minimal per-request chat for the generator side (mirrors the collector's).
+class _GeneratorChat extends StatelessWidget {
+  const _GeneratorChat({required this.requestId, required this.firestore, required this.me});
+
+  final String requestId;
+  final FirestoreService firestore;
+  final String me;
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = TextEditingController();
+    return Theme(
+      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        tilePadding: EdgeInsets.zero,
+        childrenPadding: EdgeInsets.zero,
+        collapsedIconColor: Colors.white70,
+        iconColor: Colors.white70,
+        title: const Text('Message collector', style: TextStyle(color: Colors.white70, fontSize: 13)),
+        children: [
+          SizedBox(
+            height: 180,
+            child: StreamBuilder<List<Map<String, dynamic>>>(
+              stream: firestore.streamMessages(requestId),
+              builder: (context, snapshot) {
+                final messages = snapshot.data ?? const <Map<String, dynamic>>[];
+                if (messages.isEmpty) {
+                  return const Text('No messages yet.', style: TextStyle(color: Colors.white38, fontSize: 12));
+                }
+                return ListView.builder(
+                  itemCount: messages.length,
+                  itemBuilder: (context, index) {
+                    final message = messages[index];
+                    final mine = message['sender_id'] == me;
+                    return Align(
+                      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+                      child: Container(
+                        margin: const EdgeInsets.symmetric(vertical: 3),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        constraints: const BoxConstraints(maxWidth: 280),
+                        decoration: BoxDecoration(
+                          color: mine ? const Color(0xFF10B981).withOpacity(0.8) : Colors.white.withOpacity(0.12),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: Text(message['text'] as String? ?? '', style: const TextStyle(color: Colors.white, fontSize: 13)),
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: controller,
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                  decoration: const InputDecoration(hintText: 'Ask about the pickup…'),
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.send, color: Color(0xFF4ADE80)),
+                onPressed: () {
+                  firestore.sendMessage(requestId: requestId, senderId: me, text: controller.text);
+                  controller.clear();
+                },
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }

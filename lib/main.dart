@@ -13,6 +13,7 @@ import 'screens/collector_screen.dart';
 import 'screens/generator_screen.dart';
 import 'services/firestore_service.dart';
 import 'services/messaging_service.dart';
+import 'services/outbox_service.dart';
 import 'widgets/eco_background.dart';
 import 'widgets/glass_card.dart';
 
@@ -120,10 +121,39 @@ class _RoleHome extends StatefulWidget {
 }
 
 class _RoleHomeState extends State<_RoleHome> {
+  /// Offline-tolerant action queue for collectors: failed claims/messages
+  /// retry automatically when connectivity returns.
+  late final OutboxService outbox = OutboxService((kind, payload) async {
+    switch (kind) {
+      case 'claim':
+        await widget.firestore.claimRequest(
+          requestId: payload['request_id'] as String,
+          collectorId: payload['collector_id'] as String,
+        );
+      case 'message':
+        await widget.firestore.sendMessage(
+          requestId: payload['request_id'] as String,
+          senderId: payload['sender_id'] as String,
+          text: payload['text'] as String,
+        );
+      default:
+        throw UnsupportedError('Unknown outbox action: $kind');
+    }
+  });
+
   @override
   void initState() {
     super.initState();
     MessagingService(FirebaseMessaging.instance).initializeForRole(widget.user.role, uid: widget.user.uid);
+    if (widget.user.isCollector) {
+      outbox.load();
+    }
+  }
+
+  @override
+  void dispose() {
+    outbox.dispose();
+    super.dispose();
   }
 
   @override
@@ -132,7 +162,7 @@ class _RoleHomeState extends State<_RoleHome> {
       return AdminScreen(user: widget.user, firestore: widget.firestore);
     }
     if (widget.user.isCollector) {
-      return CollectorScreen(user: widget.user, firestore: widget.firestore);
+      return CollectorScreen(user: widget.user, firestore: widget.firestore, outbox: outbox);
     }
     return GeneratorScreen(user: widget.user, firestore: widget.firestore);
   }

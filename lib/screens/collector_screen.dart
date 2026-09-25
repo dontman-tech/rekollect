@@ -1,5 +1,4 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
@@ -11,15 +10,18 @@ import '../models/pickup_request.dart';
 import '../services/dialer_service.dart';
 import '../services/firestore_service.dart';
 import '../services/location_service.dart';
+import '../services/outbox_service.dart';
+import '../services/geo.dart' as geo;
 import '../services/route_service.dart';
 import '../widgets/eco_background.dart';
 import '../widgets/glass_card.dart';
 
 class CollectorScreen extends StatefulWidget {
-  const CollectorScreen({super.key, required this.user, required this.firestore});
+  const CollectorScreen({super.key, required this.user, required this.firestore, required this.outbox});
 
   final AppUser user;
   final FirestoreService firestore;
+  final OutboxService outbox;
 
   @override
   State<CollectorScreen> createState() => _CollectorScreenState();
@@ -44,9 +46,22 @@ class _CollectorScreenState extends State<CollectorScreen> {
             stream: widget.firestore.streamOpenRequests(),
             builder: (context, snapshot) {
               final allRequests = snapshot.data ?? const <PickupRequest>[];
-              final visibleRequests = allRequests
-                  .where((request) => request.isPending || (request.isClaimed && request.collectorId == widget.user.uid))
-                  .toList();
+              // Job matching: a job reaches this collector only when its
+              // waste type is one they handle, their vehicle can carry the
+              // declared quantity, and it is inside their coverage zone.
+              final visibleRequests = allRequests.where((request) {
+                if (request.isClaimed && request.collectorId == widget.user.uid) return true;
+                if (!request.isPending) return false;
+                if (!widget.user.handlesWaste(request.wasteType)) return false;
+                if (request.estimatedKg > widget.user.capacityKg) return false;
+                final distanceKm = geo.distanceMeters(
+                      widget.user.zoneCenterLat,
+                      widget.user.zoneCenterLng,
+                      request.latitude,
+                      request.longitude,
+                    ) / 1000;
+                return distanceKm <= widget.user.zoneRadiusKm;
+              }).toList();
               return CustomScrollView(
                 slivers: [
                   SliverPadding(
@@ -63,6 +78,12 @@ class _CollectorScreenState extends State<CollectorScreen> {
                   SliverPadding(
                     padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
                     sliver: SliverToBoxAdapter(child: _ReliabilityStrip(uid: widget.user.uid, firestore: widget.firestore)),
+                  ),
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                    sliver: SliverToBoxAdapter(
+                      child: _CollectorProfileCard(user: widget.user, firestore: widget.firestore),
+                    ),
                   ),
                   if (_routeMode)
                     SliverPadding(
@@ -377,6 +398,17 @@ class _CollectorJobCardState extends State<_CollectorJobCard> {
     });
     try {
       await widget.firestore.claimRequest(requestId: widget.request.requestId, collectorId: widget.collector.uid);
+    } on FirestoreServiceException catch (error) {
+      // Offline-tolerant: queue the claim for automatic retry when
+      // connectivity returns instead of dying with an error.
+      await widget.outbox.enqueue('claim', {
+        'request_id': widget.request.requestId,
+        'collector_id': widget.collector.uid,
+      });
+      setState(() => _message = '${error.message} (saved offline — will retry when back online)');
+      return;
+    }
+    try {
       // Breadcrumb the claim into the location log — dispute evidence starts
       // here, not only at completion.
       try {
@@ -449,6 +481,16 @@ class _CollectorJobCardState extends State<_CollectorJobCard> {
           const SizedBox(height: 12),
           Text('${request.wasteType} waste pickup', style: Theme.of(context).textTheme.titleMedium?.copyWith(color: Colors.white, fontWeight: FontWeight.w700)),
           const SizedBox(height: 6),
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            children: [
+              _MiniTag(label: '~${request.estimatedKg} kg'),
+              if (request.isRecurring) const _MiniTag(label: 'Weekly', highlight: true),
+              if (request.scheduledAt != null) _MiniTag(label: 'For ${_fmt(request.scheduledAt!)}'),
+            ],
+          ),
+          const SizedBox(height: 6),
           Text('Coordinates: ${request.latitude.toStringAsFixed(5)}, ${request.longitude.toStringAsFixed(5)}'),
           if (request.directionsLandmarks != null) ...[
             const SizedBox(height: 6),
@@ -505,6 +547,191 @@ class _CollectorJobCardState extends State<_CollectorJobCard> {
             const SizedBox(height: 8),
             Text(_message!, style: const TextStyle(color: Color(0xFF4ADE80), fontWeight: FontWeight.w700)),
           ],
+          if (request.collectorId == widget.collector.uid) ...[
+            const SizedBox(height: 12),
+            _RequestChat(requestId: request.requestId, firestore: widget.firestore, me: widget.collector.uid),
+          ],
+        ],
+      ),
+    );
+  }
+
+  static String _fmt(Timestamp timestamp) {
+    final d = timestamp.toDate();
+    return '${d.day}/${d.month} ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+  }
+}
+
+/// Minimal per-request chat between the collector and the generator.
+class _RequestChat extends StatelessWidget {
+  const _RequestChat({required this.requestId, required this.firestore, required this.me});
+
+  final String requestId;
+  final FirestoreService firestore;
+  final String me;
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = TextEditingController();
+    return Theme(
+      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        tilePadding: EdgeInsets.zero,
+        childrenPadding: EdgeInsets.zero,
+        collapsedIconColor: Colors.white70,
+        iconColor: Colors.white70,
+        title: const Text('Message customer', style: TextStyle(color: Colors.white70, fontSize: 13)),
+        children: [
+          SizedBox(
+            height: 180,
+            child: StreamBuilder<List<Map<String, dynamic>>>(
+              stream: firestore.streamMessages(requestId),
+              builder: (context, snapshot) {
+                final messages = snapshot.data ?? const <Map<String, dynamic>>[];
+                if (messages.isEmpty) {
+                  return const Text('No messages yet.', style: TextStyle(color: Colors.white38, fontSize: 12));
+                }
+                return ListView.builder(
+                  itemCount: messages.length,
+                  itemBuilder: (context, index) {
+                    final message = messages[index];
+                    final mine = message['sender_id'] == me;
+                    return Align(
+                      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+                      child: Container(
+                        margin: const EdgeInsets.symmetric(vertical: 3),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        constraints: const BoxConstraints(maxWidth: 280),
+                        decoration: BoxDecoration(
+                          color: mine ? const Color(0xFF10B981).withOpacity(0.8) : Colors.white.withOpacity(0.12),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: Text(message['text'] as String? ?? '', style: const TextStyle(color: Colors.white, fontSize: 13)),
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: controller,
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                  decoration: const InputDecoration(hintText: 'On my way, 10 min…'),
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.send, color: Color(0xFF4ADE80)),
+                onPressed: () {
+                  firestore.sendMessage(requestId: requestId, senderId: me, text: controller.text);
+                  controller.clear();
+                },
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The collector's specialization config: handled waste types, vehicle
+/// (capacity), and coverage-zone radius. Jobs outside any of these never
+/// appear on the board.
+class _CollectorProfileCard extends StatefulWidget {
+  const _CollectorProfileCard({required this.user, required this.firestore});
+
+  final AppUser user;
+  final FirestoreService firestore;
+
+  @override
+  State<_CollectorProfileCard> createState() => _CollectorProfileCardState();
+}
+
+class _CollectorProfileCardState extends State<_CollectorProfileCard> {
+  late final List<String> _wasteTypes = List.of(widget.user.wasteTypes);
+  late String _vehicle = widget.user.vehicleType ?? 'motorbike';
+  late double _zoneKm = widget.user.zoneRadiusKm;
+  bool _saving = false;
+
+  Future<void> _save() async {
+    setState(() => _saving = true);
+    try {
+      await widget.firestore.updateCollectorProfile(
+        uid: widget.user.uid,
+        wasteTypes: _wasteTypes,
+        vehicleType: _vehicle,
+        zoneRadiusKm: _zoneKm,
+        zoneLatitude: widget.user.zoneCenterLat,
+        zoneLongitude: widget.user.zoneCenterLng,
+      );
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('What I collect', style: Theme.of(context).textTheme.titleMedium?.copyWith(color: Colors.white, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          const Text('Only jobs matching these settings reach your board.', style: TextStyle(color: Colors.white60, fontSize: 12)),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final type in kAllWasteTypes)
+                FilterChip(
+                  label: Text(type),
+                  selected: _wasteTypes.contains(type),
+                  onSelected: (selected) => setState(() {
+                    selected ? _wasteTypes.add(type) : _wasteTypes.remove(type);
+                  }),
+                  selectedColor: const Color(0xFF4ADE80).withOpacity(0.35),
+                  backgroundColor: Colors.white.withOpacity(0.08),
+                  labelStyle: const TextStyle(color: Colors.white, fontSize: 12),
+                  checkmarkColor: Colors.white,
+                  side: BorderSide(color: Colors.white.withOpacity(0.25)),
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<String>(
+            value: _vehicle,
+            dropdownColor: const Color(0xFF064E3B),
+            decoration: const InputDecoration(labelText: 'Vehicle type'),
+            items: [
+              for (final entry in kVehicleCapacities.entries)
+                DropdownMenuItem(value: entry.key, child: Text('${entry.key} — up to ${entry.value} kg')),
+            ],
+            onChanged: (value) => setState(() => _vehicle = value ?? _vehicle),
+          ),
+          const SizedBox(height: 10),
+          Text('Coverage zone: ${_zoneKm.toStringAsFixed(1)} km around my location', style: const TextStyle(color: Colors.white)),
+          Slider(
+            value: _zoneKm,
+            min: 0.5,
+            max: 25,
+            divisions: 49,
+            activeColor: const Color(0xFF4ADE80),
+            onChanged: (value) => setState(() => _zoneKm = value),
+          ),
+          const SizedBox(height: 6),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton(
+              onPressed: _saving ? null : _save,
+              style: FilledButton.styleFrom(backgroundColor: const Color(0xFF10B981), foregroundColor: Colors.white),
+              child: Text(_saving ? 'Saving...' : 'Save my coverage'),
+            ),
+          ),
         ],
       ),
     );
@@ -558,6 +785,26 @@ class _TypeTag extends StatelessWidget {
           Text(type.toUpperCase(), style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 12)),
         ],
       ),
+    );
+  }
+}
+
+class _MiniTag extends StatelessWidget {
+  const _MiniTag({required this.label, this.highlight = false});
+
+  final String label;
+  final bool highlight;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: highlight ? const Color(0xFFF59E0B).withOpacity(0.25) : Colors.white.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.white.withOpacity(0.2)),
+      ),
+      child: Text(label, style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600)),
     );
   }
 }

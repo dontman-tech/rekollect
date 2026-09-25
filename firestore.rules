@@ -109,6 +109,16 @@ service cloud.firestore {
           && request.resource.data.longitude is number;
         allow update, delete: if false;
       }
+
+      // Minimal per-request chat between the assigned collector and the
+      // generator: both may read and send; nobody edits or deletes history.
+      match /messages/{messageId} {
+        allow read, create: if isRequestParticipant(requestId)
+          && request.resource.data.sender_id == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() <= 500;
+        allow update, delete: if false;
+      }
     }
   }
 }

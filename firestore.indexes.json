@@ -69,6 +69,16 @@
           "order": "DESCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "messages",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        {
+          "fieldPath": "created_at",
+          "order": "ASCENDING"
+        }
+      ]
     }
   ]
 }

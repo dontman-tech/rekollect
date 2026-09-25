@@ -58,6 +58,55 @@ class FirestoreService {
     });
   }
 
+  /// Updates only the collector's specialization profile: handled waste
+  /// types, vehicle type (capacity), and coverage-zone radius/center.
+  Future<void> updateCollectorProfile({
+    required String uid,
+    required List<String> wasteTypes,
+    required String vehicleType,
+    required double zoneRadiusKm,
+    double? zoneLatitude,
+    double? zoneLongitude,
+  }) async {
+    final validTypes = wasteTypes.where(kAllWasteTypes.contains).toList();
+    await _db.collection('users').doc(uid).set({
+      'waste_types': validTypes,
+      'vehicle_type': kVehicleCapacities.containsKey(vehicleType) ? vehicleType : 'motorbike',
+      'zone_radius_km': zoneRadiusKm.clamp(0.5, 25),
+      if (zoneLatitude != null) 'zone_latitude': zoneLatitude,
+      if (zoneLongitude != null) 'zone_longitude': zoneLongitude,
+    }, SetOptions(merge: true));
+  }
+
+  // ----------------------------------------------------------------- chat
+
+  /// Minimal in-app chat: a per-request `messages` subcollection between the
+  /// generator and the assigned collector. Enough for "on my way, 10 min".
+  Stream<List<Map<String, dynamic>>> streamMessages(String requestId) {
+    return _db
+        .collection('requests')
+        .doc(requestId)
+        .collection('messages')
+        .orderBy('created_at')
+        .snapshots()
+        .map((snapshot) =>
+            snapshot.docs.map((doc) => {'id': doc.id, ...doc.data()}).toList());
+  }
+
+  Future<void> sendMessage({
+    required String requestId,
+    required String senderId,
+    required String text,
+  }) async {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+    await _db.collection('requests').doc(requestId).collection('messages').add({
+      'sender_id': senderId,
+      'text': trimmed.substring(0, trimmed.length.clamp(0, 500)),
+      'created_at': FieldValue.serverTimestamp(),
+    });
+  }
+
   // --------------------------------------------------------------- requests
   /// Creates a pickup request, enforcing a cap of [maxOpenRequests] concurrent
   /// pending requests per generator so a single account cannot flood the queue.
@@ -68,6 +117,10 @@ class FirestoreService {
     required double latitude,
     required double longitude,
     String? directionsLandmarks,
+    DateTime? scheduledAt,
+    String recurrence = 'once',
+    String? quantityBand,
+    int? quantityKg,
   }) async {
     final pending = await _db
         .collection('requests')
@@ -88,6 +141,11 @@ class FirestoreService {
       'longitude': longitude,
       'status': 'pending',
       'created_at': FieldValue.serverTimestamp(),
+      'recurrence': recurrence == 'weekly' ? 'weekly' : 'once',
+      if (scheduledAt != null) 'scheduled_at': Timestamp.fromDate(scheduledAt),
+      if (quantityBand != null && kQuantityBands.containsKey(quantityBand))
+        'quantity_band': quantityBand,
+      if (quantityKg != null && quantityKg > 0) 'quantity_kg': quantityKg,
       if (directionsLandmarks != null && directionsLandmarks.trim().isNotEmpty)
         'directions_landmarks': directionsLandmarks.trim(),
     });

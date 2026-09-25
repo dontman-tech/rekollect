@@ -37,3 +37,14 @@ flutter run
 - **Route density mode (optional)** — a collector-side toggle that clusters pending jobs within 1.5 km into one ordered sweep (max 5 stops). Off by default.
 
 Deploy rules and indexes after installing: `firebase deploy --only firestore:rules,firestore:indexes,functions`.
+
+## Marketplace features (batch 2)
+
+- **Scheduled pickups & weekly recurrence** — generators pick a date/time (or ship ASAP) and can mark a request "repeat every week"; a cloud function spawns the next week's request after each confirmation.
+- **Minimal in-app chat** — a per-request message thread between the assigned collector and the generator ("on my way, 10 min"), rules-locked to the two participants.
+- **Zone/coverage config** — collectors set the waste types they handle, their vehicle, and a coverage radius (0.5–25 km); jobs outside any of these never reach their board.
+- **Waste-type routing** — Organic/Plastic/Electronic/Bulky/Hazardous. Hazardous only reaches collectors who opted in.
+- **Vehicle capacity + quantity tagging** — generators declare a size band (~15/40/100/400 kg); collectors' vehicles carry 20 (bicycle) to 1000 (truck) kg. Jobs heavier than the collector's vehicle are hidden and rejected.
+- **Offline-tolerant collector actions** — failed claims (and messages) queue locally and retry automatically when connectivity returns; the UI says "saved offline" instead of erroring.
+
+Deploy: `firebase deploy --only firestore:rules,firestore:indexes,functions` (the recurrence + fallback dispatch functions live in `functions/`).
