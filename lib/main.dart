@@ -122,7 +122,7 @@ class _RoleHomeState extends State<_RoleHome> {
   @override
   void initState() {
     super.initState();
-    MessagingService(FirebaseMessaging.instance).initializeForRole(widget.user.role);
+    MessagingService(FirebaseMessaging.instance).initializeForRole(widget.user.role, uid: widget.user.uid);
   }
 
   @override

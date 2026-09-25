@@ -1,0 +1,48 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Users: readable by any signed-in user (names appear on requests),
+    // writable only by the owner. FCM tokens stay owner-only.
+    match /users/{userId} {
+      allow read: if request.auth != null;
+      allow create, update: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Collector availability entries: readable, owner-writable.
+    match /collectors/{collectorId} {
+      allow read: if request.auth != null;
+      allow create, update: if request.auth != null && request.auth.uid == collectorId;
+    }
+
+    // Requests: signed-in users read; only the owning generator creates;
+    // collectors may only claim (set collector_id + status = claimed);
+    // completion restricted to the claiming collector. Direct client writes
+    // to status/collector_id by others are denied — transitions go through
+    // the app's Firestore transactions, which run with the user's own auth.
+    match /requests/{requestId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null
+        && request.resource.data.generator_id == request.auth.uid
+        && request.resource.data.status == 'pending';
+      allow update: if request.auth != null && (
+        // generator cancels own pending request
+        (resource.data.status == 'pending'
+         && resource.data.generator_id == request.auth.uid
+         && request.resource.data.status == 'cancelled')
+        // collector claims a pending request
+        || (resource.data.status == 'pending'
+            && request.resource.data.status == 'claimed'
+            && request.resource.data.collector_id == request.auth.uid
+            && request.resource.data.generator_id == resource.data.generator_id
+            && request.resource.data.waste_type == resource.data.waste_type
+            && request.resource.data.latitude == resource.data.latitude
+            && request.resource.data.longitude == resource.data.longitude)
+        // claiming collector completes
+        || (resource.data.status == 'claimed'
+            && resource.data.collector_id == request.auth.uid
+            && request.resource.data.status == 'completed')
+      );
+      allow delete: if false;
+    }
+  }
+}

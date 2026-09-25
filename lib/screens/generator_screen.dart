@@ -23,6 +23,9 @@ class GeneratorScreen extends StatefulWidget {
 }
 
 class _GeneratorScreenState extends State<GeneratorScreen> {
+  static String _friendly(Object error) => error is FirestoreServiceException
+      ? error.message
+      : 'Something went wrong — check your connection and try again.';
   final _locationController = TextEditingController();
   final _directionsController = TextEditingController();
   final _nominatim = const NominatimService();
@@ -61,7 +64,7 @@ class _GeneratorScreenState extends State<GeneratorScreen> {
       final point = await _nominatim.searchLocation(_locationController.text.trim());
       setState(() => _selectedPoint = point);
     } catch (error) {
-      setState(() => _message = error.toString());
+      setState(() => _message = _friendly(error));
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -91,7 +94,7 @@ class _GeneratorScreenState extends State<GeneratorScreen> {
         _directionsController.clear();
       });
     } catch (error) {
-      setState(() => _message = error.toString());
+      setState(() => _message = _friendly(error));
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -224,10 +227,10 @@ class _GeneratorScreenState extends State<GeneratorScreen> {
 
   Widget _activeRequests() {
     return StreamBuilder<List<PickupRequest>>(
-      stream: widget.firestore.streamRequests(),
+      stream: widget.firestore.streamMyRequests(widget.user.uid),
       builder: (context, snapshot) {
         final requests = (snapshot.data ?? const <PickupRequest>[])
-            .where((request) => request.generatorId == widget.user.uid && !request.isCompleted)
+            .where((request) => !request.isCompleted)
             .toList();
         if (requests.isEmpty) {
           return const SliverPadding(

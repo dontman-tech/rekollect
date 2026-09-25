@@ -24,7 +24,7 @@ class CollectorScreen extends StatelessWidget {
       body: EcoBackground(
         child: SafeArea(
           child: StreamBuilder<List<PickupRequest>>(
-            stream: firestore.streamRequests(),
+            stream: firestore.streamOpenRequests(),
             builder: (context, snapshot) {
               final allRequests = snapshot.data ?? const <PickupRequest>[];
               final visibleRequests = allRequests
@@ -182,6 +182,9 @@ class _CollectorJobCard extends StatefulWidget {
 }
 
 class _CollectorJobCardState extends State<_CollectorJobCard> {
+  static String _friendly(Object error) => error is FirestoreServiceException
+      ? error.message
+      : 'Something went wrong — check your connection and try again.';
   bool _loading = false;
   String? _message;
 
@@ -193,7 +196,7 @@ class _CollectorJobCardState extends State<_CollectorJobCard> {
     try {
       await widget.firestore.claimRequest(requestId: widget.request.requestId, collectorId: widget.collector.uid);
     } catch (error) {
-      setState(() => _message = error.toString());
+      setState(() => _message = _friendly(error));
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -205,9 +208,9 @@ class _CollectorJobCardState extends State<_CollectorJobCard> {
       _message = null;
     });
     try {
-      await widget.firestore.completeRequest(widget.request.requestId);
+      await widget.firestore.completeRequest(requestId: widget.request.requestId, collectorId: widget.collector.uid);
     } catch (error) {
-      setState(() => _message = error.toString());
+      setState(() => _message = _friendly(error));
     } finally {
       if (mounted) setState(() => _loading = false);
     }
